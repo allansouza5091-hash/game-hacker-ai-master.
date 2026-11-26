@@ -1,49 +1,37 @@
 
-name: GAME HACKER AI - Gerar APK
+name: GAME HACKER AI - APK MASTER
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-    paths:
-      - 'game-hacker-ai.zip'
-      - '.github/workflows/build-apk.yml'
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Compilar aplicativo Android
+    name: Construir APK Android
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - name: Baixar projeto do GitHub
+      - name: Baixar projeto
         uses: actions/checkout@v4
 
-      - name: Configurar Java 17
+      - name: Configurar Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Instalar Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
-
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Instalar Android SDK 36
+      - name: Verificar ZIP
         run: |
-          yes | sdkmanager --licenses
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Verificar arquivo ZIP
-        run: |
-          test -f game-hacker-ai.zip
+          set -e
+          if [ ! -f game-hacker-ai.zip ]; then
+            echo "ERRO: ZIP não encontrado."
+            exit 1
+          fi
           unzip -t game-hacker-ai.zip
 
       - name: Extrair projeto
@@ -51,65 +39,140 @@ jobs:
           mkdir -p projeto
           unzip -q game-hacker-ai.zip -d projeto
 
-      - name: Localizar projeto Android
+      - name: Localizar Gradle e projeto
+        id: project
         run: |
+          set -e
+
           FILE=$(find projeto -type f \
             -name settings.gradle.kts -print -quit)
 
           if [ -z "$FILE" ]; then
-            echo "Projeto Gradle não encontrado."
+            FILE=$(find projeto -type f \
+              -name settings.gradle -print -quit)
+          fi
+
+          if [ -z "$FILE" ]; then
+            echo "ERRO: settings.gradle não encontrado."
+            find projeto -maxdepth 4 -type f | head -100
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$FILE")"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          DIR=$(dirname "$FILE")
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
-          test -f "$PROJECT_DIR/build.gradle.kts"
-          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          echo "Projeto localizado: $DIR"
+          ls -la "$DIR"
 
-          echo "Projeto encontrado em: $PROJECT_DIR"
-
-      - name: Criar certificado de depuração
+      - name: Detectar versão Gradle
+        id: gradle
         run: |
+          FILE="$PROJECT_FILE/gradle/wrapper/gradle-wrapper.properties"
+
+          VERSION="8.13"
+
+          if [ -f "$FILE" ]; then
+            DETECTED=$(grep distributionUrl "$FILE" \
+              | grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?' \
+              | head -1 | sed 's/gradle-//')
+
+            if [ -n "$DETECTED" ]; then
+              VERSION="$DETECTED"
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Gradle selecionado: $VERSION"
+        env:
+          PROJECT_FILE: ${{ steps.project.outputs.dir }}
+
+      - name: Instalar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle.outputs.version }}
+
+      - name: Preparar Android SDK
+        run: |
+          set -e
+
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+          SDKMANAGER=$(find "$SDK/cmdline-tools" \
+            -name sdkmanager -type f 2>/dev/null | head -1)
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERRO: sdkmanager não encontrado."
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses || true
+
+          "$SDKMANAGER" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0"
+
+      - name: Verificar estrutura Android
+        run: |
+          set -e
           cd "$PROJECT_DIR"
 
-          if [ ! -f debug.keystore ]; then
-            keytool -genkeypair -v \
-              -keystore debug.keystore \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+          if [ ! -f app/build.gradle.kts ] && \
+             [ ! -f app/build.gradle ]; then
+            echo "ERRO: módulo Android app não encontrado."
+            find . -maxdepth 3 -type f
+            exit 1
           fi
+
+          echo "Estrutura Android encontrada."
 
       - name: Compilar APK
         run: |
+          set -o pipefail
           cd "$PROJECT_DIR"
-          gradle --no-daemon --stacktrace assembleDebug
 
-      - name: Verificar APK gerado
+          gradle --no-daemon \
+            --stacktrace \
+            assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
+
+      - name: Verificar APK
+        if: success()
         run: |
-          mkdir -p dist
+          mkdir -p "$GITHUB_WORKSPACE/dist"
 
-          APK=$(find "$PROJECT_DIR/app/build/outputs/apk/debug" \
-            -type f -name '*.apk' -print -quit)
+          APK=$(find "$PROJECT_DIR" \
+            -type f -path '*/build/outputs/apk/*/*.apk' \
+            -print -quit)
 
           if [ -z "$APK" ]; then
-            echo "ERRO: APK não foi gerado."
+            echo "ERRO: APK não encontrado."
             exit 1
           fi
 
-          cp "$APK" dist/GAME-HACKER-AI-MASTER.apk
-          ls -lh dist/
+          cp "$APK" "$GITHUB_WORKSPACE/dist/GAME-HACKER-AI.apk"
+          ls -lh "$GITHUB_WORKSPACE/dist/"
+        env:
+          PROJECT_DIR: ${{ steps.project.outputs.dir }}
 
-      - name: Disponibilizar APK para download
+      - name: Disponibilizar APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: GAME-HACKER-AI-MASTER-APK
-          path: dist/GAME-HACKER-AI-MASTER.apk
-          if-no-files-found: error
+          path: dist/GAME-HACKER-AI.apk
           retention-days: 14
+
+      - name: Salvar relatório de erro
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RELATORIO-COMPILACAO
+          path: build.log
+          if-no-files-found: ignore
           
