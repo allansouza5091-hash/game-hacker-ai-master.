@@ -1,23 +1,22 @@
 
-name: GAME HACKER AI - MASTER BUILD DIAGNOSTIC
+name: GAME HACKER AI - BUILD APK
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Diagnosticar e compilar APK
+    name: Compilar Android APK
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
-      - name: Baixar repositório
+      - name: Baixar projeto
         uses: actions/checkout@v4
 
       - name: Configurar Java
@@ -26,269 +25,110 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Criar pasta de diagnóstico
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar ferramentas Android
         run: |
-          mkdir -p diagnostics
-          echo "Iniciando diagnóstico..." \
-            | tee diagnostics/status.txt
-          java -version 2>&1 \
-            | tee diagnostics/java.txt
-
-      - name: Verificar arquivo ZIP
-        run: |
-          set -e
-
-          if [ ! -f game-hacker-ai.zip ]; then
-            echo "ERRO: game-hacker-ai.zip não encontrado."
-            exit 1
-          fi
-
-          unzip -t game-hacker-ai.zip \
-            | tee diagnostics/zip-check.txt
-
-      - name: Extrair projeto
-        run: |
-          set -e
-          mkdir -p projeto
-
-          unzip -q game-hacker-ai.zip -d projeto
-
-          echo "ZIP extraído." \
-            | tee -a diagnostics/status.txt
-
-          find projeto -maxdepth 5 -type f \
-            | tee diagnostics/files.txt
-
-      - name: Localizar projeto Android
-        id: localizar
-        run: |
-          set -e
-
-          FILE=$(find projeto -type f \
-            \( -name settings.gradle.kts \
-            -o -name settings.gradle \) \
-            -print -quit)
-
-          if [ -z "$FILE" ]; then
-            echo "ERRO: Arquivo settings.gradle não encontrado."
-            exit 1
-          fi
-
-          DIR=$(dirname "$FILE")
-
-          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
-
-          echo "Projeto localizado: $DIR" \
-            | tee diagnostics/project.txt
-
-          ls -la "$DIR" \
-            | tee -a diagnostics/project.txt
-
-      - name: Detectar versão Gradle
-        id: gradle_version
-        run: |
-          VERSION="8.13"
-
-          FILE="$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
-
-          if [ -f "$FILE" ]; then
-            DETECTED=$(grep 'distributionUrl=' "$FILE" \
-              | grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?' \
-              | head -1 | sed 's/gradle-//')
-
-            if [ -n "$DETECTED" ]; then
-              VERSION="$DETECTED"
-            fi
-          fi
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          echo "Gradle: $VERSION" \
-            | tee diagnostics/gradle-version.txt
-        env:
-          PROJECT_DIR: ${{ env.PROJECT_DIR }}
-
-      - name: Instalar Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: ${{ steps.gradle_version.outputs.version }}
-
-      - name: Preparar Android SDK
-        run: |
-          set -e
-
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
-
-          if [ ! -d "$SDK" ]; then
-            echo "ERRO: Android SDK não encontrado."
-            exit 1
-          fi
-
-          echo "SDK: $SDK" \
-            | tee diagnostics/android-sdk.txt
-
-          SDKMANAGER=$(find "$SDK/cmdline-tools" \
-            -name sdkmanager -type f 2>/dev/null | head -1)
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "ERRO: sdkmanager não encontrado."
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --licenses || true
-
-          "$SDKMANAGER" \
+          sdkmanager --install \
             "platform-tools" \
-            "platforms;android-34" \
             "platforms;android-35" \
             "platforms;android-36" \
-            "build-tools;34.0.0" \
             "build-tools;35.0.0" \
-            "build-tools;36.0.0" \
-            2>&1 | tee diagnostics/sdk-install.txt
+            "build-tools;36.0.0"
 
-      - name: Verificar configuração do projeto
+      - name: Extrair ZIP e localizar projeto
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          test -f game-hacker-ai.zip
 
-          {
-            echo "=== Gradle principal ==="
-            ls -l build.gradle* settings.gradle*
-            echo "=== Módulo app ==="
-            ls -l app/
-            echo "=== Configuração Android ==="
-            cat app/build.gradle.kts 2>/dev/null || \
-              cat app/build.gradle 2>/dev/null || true
-          } > "$GITHUB_WORKSPACE/diagnostics/project-config.txt"
+          mkdir projeto
+          unzip -q game-hacker-ai.zip -d projeto
 
-          if [ ! -f app/build.gradle.kts ] && \
-             [ ! -f app/build.gradle ]; then
-            echo "ERRO: módulo app não encontrado."
-            exit 1
-          fi
+          FILE=$(find projeto -type f \
+            \( -name settings.gradle \
+            -o -name settings.gradle.kts \) \
+            -print -quit)
 
-      - name: Diagnosticar Gradle
-        run: |
-          set +e
+          test -n "$FILE"
 
-          cd "$PROJECT_DIR"
+          DIR=$(dirname "$FILE")
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
 
-          gradle --version \
-            2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/gradle-info.txt"
+          echo "Projeto encontrado: $DIR"
 
-          gradle tasks --all --no-daemon \
-            --stacktrace --info \
-            2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/gradle-tasks.txt"
-
-          STATUS=${PIPESTATUS[0]}
-
-          if [ "$STATUS" -ne 0 ]; then
-            echo "Aviso: inspeção Gradle encontrou problemas."
-          fi
-
-          exit 0
-        env:
-          PROJECT_DIR: ${{ env.PROJECT_DIR }}
-
-      - name: Compilar APK com diagnóstico completo
-        id: compile
+      - name: Compilar APK
+        id: build
         continue-on-error: true
         shell: bash
         run: |
+          set -o pipefail
           cd "$PROJECT_DIR"
 
-          set +e
-
-          gradle assembleDebug \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            --warning-mode all \
-            --console=plain \
-            2>&1 | tee "$GITHUB_WORKSPACE/diagnostics/build-full.log"
-
-          STATUS=${PIPESTATUS[0]}
-
-          echo "$STATUS" > "$GITHUB_WORKSPACE/diagnostics/exit-code.txt"
-
-          echo "Resultado da compilação: $STATUS"
-
-          exit "$STATUS"
-        env:
-          PROJECT_DIR: ${{ env.PROJECT_DIR }}
-
-      - name: Extrair causa dos erros
-        if: always()
-        run: |
-          LOG="diagnostics/build-full.log"
-
-          if [ -f "$LOG" ]; then
-            {
-              echo "=== ERROS ENCONTRADOS ==="
-              grep -niE \
-                'What went wrong:|Execution failed|Caused by:|error:|Could not|Failed to|A problem occurred|requires Java|Unsupported class file|SDK location' \
-                "$LOG" || true
-
-              echo ""
-              echo "=== FINAL DO LOG ==="
-              tail -n 180 "$LOG"
-            } > diagnostics/error-summary.txt
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug \
+              --no-daemon --stacktrace --console=plain \
+              2>&1 | tee "$GITHUB_WORKSPACE/build.log"
           else
-            echo "A compilação não chegou a gerar um log." \
-              > diagnostics/error-summary.txt
-          fi
-
-      - name: Verificar e copiar APK
-        if: steps.compile.outcome == 'success'
-        run: |
-          set -e
-
-          mkdir -p dist
-
-          APK=$(find "$PROJECT_DIR" \
-            -type f -path '*/build/outputs/apk/*/*.apk' \
-            -print -quit)
-
-          if [ -z "$APK" ]; then
-            echo "ERRO: compilação terminou, mas APK não encontrado."
+            echo "ERRO: Gradle Wrapper não encontrado."
             exit 1
           fi
 
+      - name: Gerar relatório de erros
+        if: always()
+        run: |
+          mkdir -p diagnostico
+
+          if [ -f build.log ]; then
+            grep -niE \
+              'What went wrong:|Caused by:|error:|Execution failed|Could not|Failed to' \
+              build.log > diagnostico/erros.txt || true
+
+            tail -n 150 build.log \
+              > diagnostico/log-final.txt
+
+            cp build.log diagnostico/
+          else
+            echo "Build não iniciou. Verifique as etapas anteriores." \
+              > diagnostico/erros.txt
+          fi
+
+      - name: Localizar e copiar APK
+        if: steps.build.outcome == 'success'
+        run: |
+          set -e
+          mkdir -p dist
+
+          APK=$(find "$PROJECT_DIR" -type f \
+            -path '*/build/outputs/apk/*/*.apk' \
+            -print -quit)
+
+          test -n "$APK"
           cp "$APK" dist/GAME-HACKER-AI.apk
 
-          ls -lh dist/ \
-            | tee diagnostics/apk-result.txt
-        env:
-          PROJECT_DIR: ${{ env.PROJECT_DIR }}
-
       - name: Disponibilizar APK
-        if: success() && steps.compile.outcome == 'success'
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: GAME-HACKER-AI-APK
-          path: dist/GAME-HACKER-AI.apk
-          if-no-files-found: error
-          retention-days: 14
+          path: dist/*.apk
 
-      - name: Disponibilizar relatório completo
+      - name: Disponibilizar diagnóstico
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: GAME-HACKER-AI-DIAGNOSTICO
-          path: diagnostics/
-          if-no-files-found: warn
-          retention-days: 14
+          path: diagnostico/
 
-      - name: Finalizar com resultado correto
+      - name: Resultado final
         if: always()
         run: |
-          if [ "${{ steps.compile.outcome }}" = "failure" ]; then
-            echo "A compilação falhou."
-            echo "Baixe GAME-HACKER-AI-DIAGNOSTICO."
+          if [ "${{ steps.build.outcome }}" != "success" ]; then
+            echo "ERRO: compilação não concluída."
             exit 1
           fi
 
-          echo "Etapa de compilação concluída."
+          echo "APK compilado com sucesso!"
           
